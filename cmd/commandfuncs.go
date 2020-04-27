@@ -16,6 +16,7 @@ package caddycmd
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -254,15 +255,20 @@ func cmdStop(fl Flags) (int, error) {
 	if stopCmdAddrFlag != "" {
 		adminAddr = stopCmdAddrFlag
 	}
-	stopEndpoint := fmt.Sprintf("http://%s/stop", adminAddr)
+	parsedAdminAddr, err := caddy.ParseNetworkAddress(adminAddr)
+	if err != nil || parsedAdminAddr.PortRangeSize() > 1 {
+		return caddy.ExitCodeFailedStartup, fmt.Errorf("invalid admin address %s: %v", adminAddr, err)
+	}
+	adminOrigin := parsedAdminAddr.JoinHostPort(0)
+	stopEndpoint := fmt.Sprintf("http://%s/stop", adminOrigin)
 
 	req, err := http.NewRequest(http.MethodPost, stopEndpoint, nil)
 	if err != nil {
 		return caddy.ExitCodeFailedStartup, fmt.Errorf("making request: %v", err)
 	}
-	req.Header.Set("Origin", adminAddr)
+	req.Header.Set("Origin", adminOrigin)
 
-	err = apiRequest(req)
+	err = apiRequest(req, parsedAdminAddr)
 	if err != nil {
 		caddy.Log().Warn("failed using API to stop instance",
 			zap.String("endpoint", stopEndpoint),
@@ -304,7 +310,12 @@ func cmdReload(fl Flags) (int, error) {
 	if adminAddr == "" {
 		adminAddr = caddy.DefaultAdminListen
 	}
-	loadEndpoint := fmt.Sprintf("http://%s/load", adminAddr)
+	parsedAdminAddr, err := caddy.ParseNetworkAddress(adminAddr)
+	if err != nil || parsedAdminAddr.PortRangeSize() > 1 {
+		return caddy.ExitCodeFailedStartup, fmt.Errorf("invalid admin address %s: %v", adminAddr, err)
+	}
+	adminOrigin := parsedAdminAddr.JoinHostPort(0)
+	loadEndpoint := fmt.Sprintf("http://%s/load", adminOrigin)
 
 	// prepare the request to update the configuration
 	req, err := http.NewRequest(http.MethodPost, loadEndpoint, bytes.NewReader(config))
@@ -312,9 +323,9 @@ func cmdReload(fl Flags) (int, error) {
 		return caddy.ExitCodeFailedStartup, fmt.Errorf("making request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", adminAddr)
+	req.Header.Set("Origin", adminOrigin)
 
-	err = apiRequest(req)
+	err = apiRequest(req, parsedAdminAddr)
 	if err != nil {
 		return caddy.ExitCodeFailedStartup, fmt.Errorf("sending configuration to instance: %v", err)
 	}
@@ -619,8 +630,16 @@ commands:
 	return caddy.ExitCodeSuccess, nil
 }
 
-func apiRequest(req *http.Request) error {
-	resp, err := http.DefaultClient.Do(req)
+func apiRequest(req *http.Request, adminAddr caddy.NetworkAddress) error {
+	client := http.Client{
+		Transport: &http.Transport{
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial(adminAddr.Network, adminAddr.JoinHostPort(0))
+			},
+		},
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("performing request: %v", err)
 	}
